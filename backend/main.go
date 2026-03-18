@@ -12,12 +12,12 @@ import (
 	"github.com/joho/godotenv"
 
 	appcfg "github.com/yourorg/whatsapp-s3-uploader/config"
+	"github.com/yourorg/whatsapp-s3-uploader/db"
 	"github.com/yourorg/whatsapp-s3-uploader/handlers"
 	"github.com/yourorg/whatsapp-s3-uploader/services"
 )
 
 func main() {
-	// Load .env if present (ignored in production where env vars are set directly).
 	if err := godotenv.Load(); err != nil {
 		log.Println("no .env file found, reading from environment")
 	}
@@ -27,7 +27,14 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	// Build services.
+	// Connect to database
+	database, err := db.Connect(cfg)
+	if err != nil {
+		log.Fatalf("database error: %v", err)
+	}
+	defer database.Close()
+
+	// Build services
 	s3Svc, err := services.NewS3Service(cfg)
 	if err != nil {
 		log.Fatalf("s3 service error: %v", err)
@@ -35,18 +42,14 @@ func main() {
 
 	waSvc := services.NewWhatsAppService(cfg)
 
-	// Build handlers.
-	webhookHandler := handlers.NewWebhookHandler(cfg, s3Svc, waSvc)
+	// Build handlers
+	webhookHandler := handlers.NewWebhookHandler(cfg, s3Svc, waSvc, database)
 
-	// Register routes.
+	// Routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handlers.HealthCheck)
-
-	// WhatsApp webhook — Meta calls GET to verify and POST to deliver messages.
 	mux.HandleFunc("GET /webhook", webhookHandler.Verify)
 	mux.HandleFunc("POST /webhook", webhookHandler.Receive)
-
-	// Direct file upload endpoint (for non-WhatsApp clients).
 	mux.HandleFunc("POST /upload", webhookHandler.DirectUpload)
 
 	server := &http.Server{
@@ -57,7 +60,6 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Start in background.
 	go func() {
 		log.Printf("server listening on :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -65,7 +67,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on SIGINT / SIGTERM.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -80,9 +81,9 @@ func main() {
 	log.Println("server stopped")
 }
 
-// loggingMiddleware logs method, path, and latency for every request.
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ngrok-skip-browser-warning", "true")
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, code: http.StatusOK}
 		next.ServeHTTP(rw, r)

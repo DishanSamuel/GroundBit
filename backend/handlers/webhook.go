@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	appcfg "github.com/yourorg/whatsapp-s3-uploader/config"
+	"github.com/yourorg/whatsapp-s3-uploader/db"
 	"github.com/yourorg/whatsapp-s3-uploader/models"
 	"github.com/yourorg/whatsapp-s3-uploader/services"
 )
@@ -19,16 +20,17 @@ type WebhookHandler struct {
 	cfg *appcfg.Config
 	s3  *services.S3Service
 	wa  *services.WhatsAppService
+	db  *db.DB
 }
 
-func NewWebhookHandler(cfg *appcfg.Config, s3 *services.S3Service, wa *services.WhatsAppService) *WebhookHandler {
-	return &WebhookHandler{cfg: cfg, s3: s3, wa: wa}
+func NewWebhookHandler(cfg *appcfg.Config, s3 *services.S3Service, wa *services.WhatsAppService, database *db.DB) *WebhookHandler {
+	return &WebhookHandler{cfg: cfg, s3: s3, wa: wa, db: database}
 }
 
-// Verify handles GET /webhook — used by Meta to verify your endpoint during setup.
+// Verify handles GET /webhook
 func (h *WebhookHandler) Verify(w http.ResponseWriter, r *http.Request) {
-	mode      := r.URL.Query().Get("hub.mode")
-	token     := r.URL.Query().Get("hub.verify_token")
+	mode := r.URL.Query().Get("hub.mode")
+	token := r.URL.Query().Get("hub.verify_token")
 	challenge := r.URL.Query().Get("hub.challenge")
 
 	if mode == "subscribe" && token == h.cfg.WhatsAppVerifyToken {
@@ -42,10 +44,8 @@ func (h *WebhookHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "forbidden", http.StatusForbidden)
 }
 
-// Receive handles POST /webhook — incoming messages from Meta.
+// Receive handles POST /webhook
 func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
-	// Always return 200 immediately; Meta will retry if it doesn't get one.
-	// Do the actual work asynchronously.
 	w.WriteHeader(http.StatusOK)
 
 	var payload models.WebhookPayload
@@ -54,7 +54,6 @@ func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only handle whatsapp_business_account events.
 	if payload.Object != "whatsapp_business_account" {
 		return
 	}
@@ -64,29 +63,40 @@ func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
 			if change.Field != "messages" {
 				continue
 			}
+			// Extract contact name map: phone -> name
+			nameMap := make(map[string]string)
+			for _, c := range change.Value.Contacts {
+				nameMap[c.WaID] = c.Profile.Name
+			}
 			for _, msg := range change.Value.Messages {
-				go h.handleMessage(msg)
+				name := nameMap[msg.From]
+				go h.handleMessage(msg, name)
 			}
 		}
 	}
 }
 
-// handleMessage processes a single incoming message in a goroutine.
-func (h *WebhookHandler) handleMessage(msg models.Message) {
+// handleMessage processes a single incoming message
+func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 	ctx := context.Background()
 	from := msg.From
 
 	media, folder, filename := extractMedia(msg)
 	if media == nil {
-		// Not a media message — ignore or reply with help text.
 		log.Printf("non-media message from %s (type: %s)", from, msg.Type)
 		_ = h.wa.SendTextMessage(ctx, from, "Please send a file (image, video, audio, or document) to upload it.")
 		return
 	}
 
-	log.Printf("received %s from %s: media_id=%s", msg.Type, from, media.ID)
+	log.Printf("received %s from %s (%s): media_id=%s", msg.Type, from, name, media.ID)
 
-	// Step 1: Resolve media_id → download URL.
+	// Upsert farmer into DB
+	farmerID, err := h.db.UpsertFarmer(from, name, "whatsapp")
+	if err != nil {
+		log.Printf("upsert farmer error: %v", err)
+	}
+
+	// Resolve media URL
 	mediaInfo, err := h.wa.GetMediaURL(ctx, media.ID)
 	if err != nil {
 		log.Printf("get media url error: %v", err)
@@ -94,7 +104,7 @@ func (h *WebhookHandler) handleMessage(msg models.Message) {
 		return
 	}
 
-	// Step 2: Download the file from Meta's CDN.
+	// Download file
 	body, contentType, size, err := h.wa.DownloadMedia(ctx, mediaInfo.URL)
 	if err != nil {
 		log.Printf("download media error: %v", err)
@@ -103,30 +113,47 @@ func (h *WebhookHandler) handleMessage(msg models.Message) {
 	}
 	defer body.Close()
 
-	// Step 3: Determine filename.
+	// Determine filename
 	if filename == "" {
 		ext := services.ExtensionFromMIME(contentType)
 		filename = fmt.Sprintf("%s%s", media.ID, ext)
 	}
 
-	// Step 4: Upload to S3.
-	result, err := h.s3.Upload(ctx, body, folder, sanitizeFilename(filename), contentType, size)
+	cleanName := sanitizeFilename(filename)
+
+	// Upload to S3
+	result, err := h.s3.Upload(ctx, body, folder, cleanName, contentType, size)
 	if err != nil {
 		log.Printf("s3 upload error: %v", err)
 		_ = h.wa.SendTextMessage(ctx, from, "Sorry, the upload failed. Please try again.")
 		return
 	}
 
-	log.Printf("uploaded to s3: %s", result.Key)
+	log.Printf("uploaded to s3: %s (farmer: %s / %s)", result.Key, name, from)
 
-	// Step 5: Confirm to the user.
+	// Log upload to DB
+	if farmerID != "" {
+		if err := h.db.LogUpload(db.Upload{
+			FarmerID:     farmerID,
+			Phone:        from,
+			S3Key:        result.Key,
+			S3URL:        result.URL,
+			FileType:     folder,
+			MimeType:     contentType,
+			FileSize:     size,
+			OriginalName: cleanName,
+		}); err != nil {
+			log.Printf("log upload error: %v", err)
+		}
+	}
+
+	// Reply to user
 	reply := fmt.Sprintf("✅ Your file has been uploaded successfully!\n\nKey: %s", result.Key)
 	if err := h.wa.SendTextMessage(ctx, from, reply); err != nil {
 		log.Printf("send reply error: %v", err)
 	}
 }
 
-// extractMedia pulls the media payload and categorises it.
 func extractMedia(msg models.Message) (media *models.MediaInfo, folder, filename string) {
 	switch msg.Type {
 	case "image":
@@ -153,7 +180,6 @@ func extractMedia(msg models.Message) (media *models.MediaInfo, folder, filename
 	return nil, "", ""
 }
 
-// sanitizeFilename removes path separators to prevent directory traversal.
 func sanitizeFilename(name string) string {
 	name = filepath.Base(name)
 	name = strings.ReplaceAll(name, "..", "")
@@ -163,17 +189,13 @@ func sanitizeFilename(name string) string {
 	return name
 }
 
-// UploadStats holds a lightweight in-memory counter (replace with Prometheus in prod).
 var uploadCount int64
 
-func incrementUploadCount() {
-	uploadCount++
-}
+func incrementUploadCount() { uploadCount++ }
 
-// DirectUpload reads a multipart file upload and pushes it straight to S3.
-// Useful for REST clients outside of WhatsApp.
+// DirectUpload handles POST /upload
 func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(50 << 20); err != nil { // 50 MB limit
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		http.Error(w, "file too large (max 50 MB)", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -185,23 +207,43 @@ func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	phone := r.FormValue("phone")
+	name := r.FormValue("name")
+
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	result, err := h.s3.Upload(
-		r.Context(),
-		file,
-		"direct",
-		sanitizeFilename(header.Filename),
-		contentType,
-		header.Size,
-	)
+	cleanName := sanitizeFilename(header.Filename)
+
+	result, err := h.s3.Upload(r.Context(), file, "direct", cleanName, contentType, header.Size)
 	if err != nil {
 		log.Printf("direct upload error: %v", err)
 		http.Error(w, "upload failed", http.StatusInternalServerError)
 		return
+	}
+
+	// Log to DB if phone provided
+	if phone != "" {
+		farmerID, err := h.db.UpsertFarmer(phone, name, "direct")
+		if err != nil {
+			log.Printf("upsert farmer error: %v", err)
+		}
+		if farmerID != "" {
+			if err := h.db.LogUpload(db.Upload{
+				FarmerID:     farmerID,
+				Phone:        phone,
+				S3Key:        result.Key,
+				S3URL:        result.URL,
+				FileType:     "direct",
+				MimeType:     contentType,
+				FileSize:     header.Size,
+				OriginalName: cleanName,
+			}); err != nil {
+				log.Printf("log upload error: %v", err)
+			}
+		}
 	}
 
 	incrementUploadCount()
@@ -214,7 +256,7 @@ func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HealthCheck is a simple liveness probe endpoint.
+// HealthCheck is a liveness probe
 func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -223,5 +265,4 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Drain cleanly reads and discards a response body to allow connection reuse.
 func drain(r io.Reader) { _, _ = io.Copy(io.Discard, r) }

@@ -16,15 +16,24 @@ type Config struct {
 	S3Bucket       string
 
 	// WhatsApp / Meta
-	WhatsAppToken       string // Bearer token from Meta developer console
-	WhatsAppPhoneID     string // Phone Number ID from Meta
-	WhatsAppVerifyToken string // Token you define for webhook verification
-	WhatsAppAPIVersion  string // e.g. "v19.0"
+	WhatsAppToken       string
+	WhatsAppPhoneID     string
+	WhatsAppVerifyToken string
+	WhatsAppAPIVersion  string
+
+	// Database
+	DBHost        string
+	DBPort        string
+	DBUser        string
+	DBPassword    string
+	DBName        string
+	DBSSLMode     string
+	DBSSLRootCert string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:                getEnv("PORT", "8000"),
+		Port:                getEnv("PORT", "8080"),
 		AWSRegion:           getEnv("AWS_REGION", "eu-north-1"),
 		AWSAccessKeyID:      getEnv("AWS_ACCESS_KEY_ID", ""),
 		AWSSecretKey:        getEnv("AWS_SECRET_ACCESS_KEY", ""),
@@ -33,6 +42,13 @@ func Load() (*Config, error) {
 		WhatsAppPhoneID:     getEnv("WHATSAPP_PHONE_ID", ""),
 		WhatsAppVerifyToken: getEnv("WHATSAPP_VERIFY_TOKEN", ""),
 		WhatsAppAPIVersion:  getEnv("WHATSAPP_API_VERSION", "v19.0"),
+		DBHost:              getEnv("DB_HOST", ""),
+		DBPort:              getEnv("DB_PORT", "5432"),
+		DBUser:              getEnv("DB_USER", ""),
+		DBPassword:          getEnv("DB_PASSWORD", ""),
+		DBName:              getEnv("DB_NAME", "groundbit"),
+		DBSSLMode:           getEnv("DB_SSLMODE", "verify-full"),
+		DBSSLRootCert:       getEnv("DB_SSLROOTCERT", "/home/ubuntu/global-bundle.pem"),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -47,6 +63,9 @@ func (c *Config) validate() error {
 		"WHATSAPP_TOKEN":        c.WhatsAppToken,
 		"WHATSAPP_PHONE_ID":     c.WhatsAppPhoneID,
 		"WHATSAPP_VERIFY_TOKEN": c.WhatsAppVerifyToken,
+		"DB_HOST":               c.DBHost,
+		"DB_USER":               c.DBUser,
+		"DB_PASSWORD":           c.DBPassword,
 	}
 	for name, val := range required {
 		if val == "" {
