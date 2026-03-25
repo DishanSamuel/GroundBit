@@ -1,6 +1,5 @@
 package models
 
-// WebhookPayload is the top-level structure Meta sends to your webhook endpoint.
 type WebhookPayload struct {
 	Object string  `json:"object"`
 	Entry  []Entry `json:"entry"`
@@ -48,18 +47,25 @@ type Message struct {
 	Audio     *MediaInfo `json:"audio,omitempty"`
 	Document  *MediaInfo `json:"document,omitempty"`
 	Sticker   *MediaInfo `json:"sticker,omitempty"`
+	Location  *Location  `json:"location,omitempty"`
 }
 
-// MediaInfo contains the media_id (and optional caption/filename) for any media message.
 type MediaInfo struct {
 	ID       string `json:"id"`
 	MimeType string `json:"mime_type"`
 	SHA256   string `json:"sha256"`
-	Filename string `json:"filename,omitempty"` // documents only
+	Filename string `json:"filename,omitempty"`
 	Caption  string `json:"caption,omitempty"`
 }
 
-// MediaURLResponse is returned by GET /<media_id> from the WhatsApp API.
+// Location is sent when the user shares their location on WhatsApp.
+type Location struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Name      string  `json:"name,omitempty"`    // place name if shared
+	Address   string  `json:"address,omitempty"` // address if shared
+}
+
 type MediaURLResponse struct {
 	URL      string `json:"url"`
 	MimeType string `json:"mime_type"`
@@ -69,8 +75,8 @@ type MediaURLResponse struct {
 }
 
 type Status struct {
-	ID           string `json:"id"`
-	Status       string `json:"status"`
-	Timestamp    string `json:"timestamp"`
-	RecipientID  string `json:"recipient_id"`
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Timestamp   string `json:"timestamp"`
+	RecipientID string `json:"recipient_id"`
 }

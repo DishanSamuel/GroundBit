@@ -27,7 +27,6 @@ func NewWebhookHandler(cfg *appcfg.Config, s3 *services.S3Service, wa *services.
 	return &WebhookHandler{cfg: cfg, s3: s3, wa: wa, db: database}
 }
 
-// Verify handles GET /webhook
 func (h *WebhookHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	mode := r.URL.Query().Get("hub.mode")
 	token := r.URL.Query().Get("hub.verify_token")
@@ -39,12 +38,9 @@ func (h *WebhookHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, challenge)
 		return
 	}
-
-	log.Printf("webhook verification failed: mode=%s token=%s", mode, token)
 	http.Error(w, "forbidden", http.StatusForbidden)
 }
 
-// Receive handles POST /webhook
 func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
@@ -63,7 +59,6 @@ func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
 			if change.Field != "messages" {
 				continue
 			}
-			// Extract contact name map: phone -> name
 			nameMap := make(map[string]string)
 			for _, c := range change.Value.Contacts {
 				nameMap[c.WaID] = c.Profile.Name
@@ -76,27 +71,54 @@ func (h *WebhookHandler) Receive(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleMessage processes a single incoming message
 func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 	ctx := context.Background()
 	from := msg.From
 
+	// ── Location message ──────────────────────────────────────────────
+	if msg.Type == "location" && msg.Location != nil {
+		loc := msg.Location
+		log.Printf("location from %s (%s): lat=%.6f lng=%.6f name=%s",
+			from, name, loc.Latitude, loc.Longitude, loc.Name)
+
+		// Ensure farmer exists first
+		if _, err := h.db.UpsertFarmer(from, name, "whatsapp"); err != nil {
+			log.Printf("upsert farmer error: %v", err)
+		}
+
+		// Save location
+		if err := h.db.UpdateFarmerLocation(from, loc.Latitude, loc.Longitude, loc.Name, loc.Address); err != nil {
+			log.Printf("update location error: %v", err)
+			_ = h.wa.SendTextMessage(ctx, from, "Sorry, I couldn't save your location. Please try again.")
+			return
+		}
+
+		reply := fmt.Sprintf("📍 Location saved!\n\nLat: %.6f\nLng: %.6f", loc.Latitude, loc.Longitude)
+		if loc.Name != "" {
+			reply += fmt.Sprintf("\nPlace: %s", loc.Name)
+		}
+		if loc.Address != "" {
+			reply += fmt.Sprintf("\nAddress: %s", loc.Address)
+		}
+		_ = h.wa.SendTextMessage(ctx, from, reply)
+		return
+	}
+
+	// ── Media message ─────────────────────────────────────────────────
 	media, folder, filename := extractMedia(msg)
 	if media == nil {
 		log.Printf("non-media message from %s (type: %s)", from, msg.Type)
-		_ = h.wa.SendTextMessage(ctx, from, "Please send a file (image, video, audio, or document) to upload it.")
+		_ = h.wa.SendTextMessage(ctx, from, "Send a file or share your location to get started.")
 		return
 	}
 
 	log.Printf("received %s from %s (%s): media_id=%s", msg.Type, from, name, media.ID)
 
-	// Upsert farmer into DB
 	farmerID, err := h.db.UpsertFarmer(from, name, "whatsapp")
 	if err != nil {
 		log.Printf("upsert farmer error: %v", err)
 	}
 
-	// Resolve media URL
 	mediaInfo, err := h.wa.GetMediaURL(ctx, media.ID)
 	if err != nil {
 		log.Printf("get media url error: %v", err)
@@ -104,7 +126,6 @@ func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 		return
 	}
 
-	// Download file
 	body, contentType, size, err := h.wa.DownloadMedia(ctx, mediaInfo.URL)
 	if err != nil {
 		log.Printf("download media error: %v", err)
@@ -113,15 +134,12 @@ func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 	}
 	defer body.Close()
 
-	// Determine filename
 	if filename == "" {
 		ext := services.ExtensionFromMIME(contentType)
 		filename = fmt.Sprintf("%s%s", media.ID, ext)
 	}
-
 	cleanName := sanitizeFilename(filename)
 
-	// Upload to S3
 	result, err := h.s3.Upload(ctx, body, folder, cleanName, contentType, size)
 	if err != nil {
 		log.Printf("s3 upload error: %v", err)
@@ -131,7 +149,6 @@ func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 
 	log.Printf("uploaded to s3: %s (farmer: %s / %s)", result.Key, name, from)
 
-	// Log upload to DB
 	if farmerID != "" {
 		if err := h.db.LogUpload(db.Upload{
 			FarmerID:     farmerID,
@@ -147,11 +164,8 @@ func (h *WebhookHandler) handleMessage(msg models.Message, name string) {
 		}
 	}
 
-	// Reply to user
 	reply := fmt.Sprintf("✅ Your file has been uploaded successfully!\n\nKey: %s", result.Key)
-	if err := h.wa.SendTextMessage(ctx, from, reply); err != nil {
-		log.Printf("send reply error: %v", err)
-	}
+	_ = h.wa.SendTextMessage(ctx, from, reply)
 }
 
 func extractMedia(msg models.Message) (media *models.MediaInfo, folder, filename string) {
@@ -193,7 +207,6 @@ var uploadCount int64
 
 func incrementUploadCount() { uploadCount++ }
 
-// DirectUpload handles POST /upload
 func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		http.Error(w, "file too large (max 50 MB)", http.StatusRequestEntityTooLarge)
@@ -224,7 +237,6 @@ func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log to DB if phone provided
 	if phone != "" {
 		farmerID, err := h.db.UpsertFarmer(phone, name, "direct")
 		if err != nil {
@@ -247,7 +259,6 @@ func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incrementUploadCount()
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -256,7 +267,6 @@ func (h *WebhookHandler) DirectUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HealthCheck is a liveness probe
 func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

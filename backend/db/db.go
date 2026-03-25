@@ -15,7 +15,6 @@ type DB struct {
 	*sql.DB
 }
 
-// Connect opens a connection pool to PostgreSQL and verifies it with a ping.
 func Connect(cfg *appcfg.Config) (*DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s sslrootcert=%s",
@@ -28,7 +27,6 @@ func Connect(cfg *appcfg.Config) (*DB, error) {
 		return nil, fmt.Errorf("opening db: %w", err)
 	}
 
-	// Connection pool settings
 	sqlDB.SetMaxOpenConns(10)
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
@@ -41,16 +39,18 @@ func Connect(cfg *appcfg.Config) (*DB, error) {
 	return &DB{sqlDB}, nil
 }
 
-// Farmer represents a registered WhatsApp user.
 type Farmer struct {
-	ID        string
-	Phone     string
-	Name      string
-	Channel   string
-	CreatedAt time.Time
+	ID           string
+	Phone        string
+	Name         string
+	Channel      string
+	Latitude     *float64
+	Longitude    *float64
+	LocationName *string
+	Address      *string
+	CreatedAt    time.Time
 }
 
-// Upload represents a single file upload event.
 type Upload struct {
 	ID           string
 	FarmerID     string
@@ -64,8 +64,7 @@ type Upload struct {
 	UploadedAt   time.Time
 }
 
-// UpsertFarmer creates a new farmer or updates their name if they already exist.
-// Returns the farmer's UUID.
+// UpsertFarmer creates a new farmer or updates their name if already exists.
 func (db *DB) UpsertFarmer(phone, name, channel string) (string, error) {
 	query := `
 		INSERT INTO farmers (phone, name, channel)
@@ -81,6 +80,34 @@ func (db *DB) UpsertFarmer(phone, name, channel string) (string, error) {
 		return "", fmt.Errorf("upsert farmer: %w", err)
 	}
 	return id, nil
+}
+
+// UpdateFarmerLocation saves the farmer's shared WhatsApp location.
+func (db *DB) UpdateFarmerLocation(phone string, lat, lng float64, name, address string) error {
+	query := `
+		UPDATE farmers
+		SET latitude           = $1,
+		    longitude          = $2,
+		    location_name      = $3,
+		    address            = $4,
+		    location_updated_at = NOW(),
+		    updated_at         = NOW()
+		WHERE phone = $5
+	`
+	res, err := db.Exec(query, lat, lng, name, address, phone)
+	if err != nil {
+		return fmt.Errorf("update farmer location: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		// Farmer doesn't exist yet — upsert them first then update location
+		if _, err := db.UpsertFarmer(phone, "", "whatsapp"); err != nil {
+			return err
+		}
+		_, err = db.Exec(query, lat, lng, name, address, phone)
+		return err
+	}
+	return nil
 }
 
 // LogUpload records a completed file upload linked to a farmer.
