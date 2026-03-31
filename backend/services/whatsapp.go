@@ -14,10 +14,9 @@ import (
 	"github.com/yourorg/whatsapp-s3-uploader/models"
 )
 
-// WhatsAppService wraps the Meta WhatsApp Cloud API.
 type WhatsAppService struct {
-	cfg    *appcfg.Config
-	client *http.Client
+	cfg     *appcfg.Config
+	client  *http.Client
 	baseURL string
 }
 
@@ -29,7 +28,7 @@ func NewWhatsAppService(cfg *appcfg.Config) *WhatsAppService {
 	}
 }
 
-// GetMediaURL calls the WhatsApp API to resolve a media_id into a download URL.
+// GetMediaURL resolves a media_id into a download URL.
 func (w *WhatsAppService) GetMediaURL(ctx context.Context, mediaID string) (*models.MediaURLResponse, error) {
 	url := fmt.Sprintf("%s/%s", w.baseURL, mediaID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -56,14 +55,12 @@ func (w *WhatsAppService) GetMediaURL(ctx context.Context, mediaID string) (*mod
 	return &result, nil
 }
 
-// DownloadMedia fetches the actual media bytes from the URL returned by GetMediaURL.
-// Returns the body stream, content-type, and content-length.
+// DownloadMedia fetches the actual media bytes from Meta's CDN.
 func (w *WhatsAppService) DownloadMedia(ctx context.Context, mediaURL string) (io.ReadCloser, string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
 	if err != nil {
 		return nil, "", 0, err
 	}
-	// Meta requires the bearer token even for the CDN download URL.
 	req.Header.Set("Authorization", "Bearer "+w.cfg.WhatsAppToken)
 
 	resp, err := w.client.Do(req)
@@ -90,7 +87,19 @@ func (w *WhatsAppService) SendTextMessage(ctx context.Context, to, text string) 
 	return w.postMessage(ctx, payload)
 }
 
-// SendTemplateMessage sends a template message (useful for initial contact outside 24h window).
+// SendAudioMessage sends an audio file back to the user via WhatsApp.
+// audioURL must be a publicly accessible URL (presigned S3 URL).
+func (w *WhatsAppService) SendAudioMessage(ctx context.Context, to, audioURL string) error {
+	payload := map[string]any{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "audio",
+		"audio":             map[string]string{"link": audioURL},
+	}
+	return w.postMessage(ctx, payload)
+}
+
+// SendTemplateMessage sends a template message.
 func (w *WhatsAppService) SendTemplateMessage(ctx context.Context, to, templateName, langCode string) error {
 	payload := map[string]any{
 		"messaging_product": "whatsapp",

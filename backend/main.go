@@ -13,7 +13,7 @@ import (
 
 	appcfg "github.com/yourorg/whatsapp-s3-uploader/config"
 	"github.com/yourorg/whatsapp-s3-uploader/db"
-	"github.com/yourorg/whatsapp-s3-uploader/handlers"
+	handlers "github.com/yourorg/whatsapp-s3-uploader/handlers"
 	"github.com/yourorg/whatsapp-s3-uploader/services"
 )
 
@@ -27,23 +27,45 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	// Connect to database
+	// Database
 	database, err := db.Connect(cfg)
 	if err != nil {
 		log.Fatalf("database error: %v", err)
 	}
 	defer database.Close()
 
-	// Build services
+	// AWS S3
 	s3Svc, err := services.NewS3Service(cfg)
 	if err != nil {
 		log.Fatalf("s3 service error: %v", err)
 	}
 
+	// WhatsApp
 	waSvc := services.NewWhatsAppService(cfg)
 
-	// Build handlers
-	webhookHandler := handlers.NewWebhookHandler(cfg, s3Svc, waSvc, database)
+	// GCP STT
+	sttSvc, err := services.NewSTTService(cfg.GCPCredentialsFile)
+	if err != nil {
+		log.Fatalf("stt service error: %v", err)
+	}
+	defer sttSvc.Close()
+
+	// GCP TTS
+	ttsSvc, err := services.NewTTSService(cfg.GCPCredentialsFile)
+	if err != nil {
+		log.Fatalf("tts service error: %v", err)
+	}
+	defer ttsSvc.Close()
+
+	// Gemini
+	geminiSvc, err := services.NewGeminiService(cfg.GeminiAPIKey)
+	if err != nil {
+		log.Fatalf("gemini service error: %v", err)
+	}
+	defer geminiSvc.Close()
+
+	// Handler
+	webhookHandler := handlers.NewWebhookHandler(cfg, s3Svc, waSvc, database, sttSvc, ttsSvc, geminiSvc)
 
 	// Routes
 	mux := http.NewServeMux()
@@ -74,7 +96,6 @@ func main() {
 	log.Println("shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatalf("forced shutdown: %v", err)
 	}

@@ -29,12 +29,16 @@ type Config struct {
 	DBName        string
 	DBSSLMode     string
 	DBSSLRootCert string
+
+	// GCP
+	GCPCredentialsFile string
+	GeminiAPIKey       string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                getEnv("PORT", "8080"),
-		AWSRegion:           getEnv("AWS_REGION", "eu-north-1"),
+		AWSRegion:           getEnv("AWS_REGION", "us-east-1"),
 		AWSAccessKeyID:      getEnv("AWS_ACCESS_KEY_ID", ""),
 		AWSSecretKey:        getEnv("AWS_SECRET_ACCESS_KEY", ""),
 		S3Bucket:            getEnv("S3_BUCKET", ""),
@@ -49,6 +53,8 @@ func Load() (*Config, error) {
 		DBName:              getEnv("DB_NAME", "groundbit"),
 		DBSSLMode:           getEnv("DB_SSLMODE", "verify-full"),
 		DBSSLRootCert:       getEnv("DB_SSLROOTCERT", "/home/ubuntu/global-bundle.pem"),
+		GCPCredentialsFile:  getEnv("GCP_CREDENTIALS_FILE", ""),
+		GeminiAPIKey:        getEnv("GEMINI_API_KEY", ""),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -66,6 +72,8 @@ func (c *Config) validate() error {
 		"DB_HOST":               c.DBHost,
 		"DB_USER":               c.DBUser,
 		"DB_PASSWORD":           c.DBPassword,
+		"GCP_CREDENTIALS_FILE":  c.GCPCredentialsFile,
+		"GEMINI_API_KEY":        c.GeminiAPIKey,
 	}
 	for name, val := range required {
 		if val == "" {
